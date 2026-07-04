@@ -1,1 +1,1 @@
-web: python src/bot.py
+web: playwright install chromium && python src/bot.py
