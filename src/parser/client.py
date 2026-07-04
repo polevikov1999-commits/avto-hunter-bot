@@ -1,5 +1,5 @@
 """
-Асинхронный клиент для парсинга AV.BY (без Playwright)
+Асинхронный клиент для парсинга AV.BY с поддержкой прокси
 """
 import asyncio
 import re
@@ -18,10 +18,15 @@ logger = get_logger('parser')
 
 
 class AVByParser:
-    """Парсер для cars.av.by через httpx с улучшенной маскировкой"""
+    """Парсер для cars.av.by с поддержкой прокси"""
     
-    def __init__(self):
+    def __init__(self, proxy: str = None):
+        """
+        Args:
+            proxy: URL прокси-сервера (например, http://user:pass@ip:port)
+        """
         self.timeout = 30.0
+        self.proxy = proxy or os.getenv("PROXY_URL")  # читаем из переменных окружения
     
     def _get_headers(self) -> Dict[str, str]:
         """Генерирует случайные заголовки для каждого запроса"""
@@ -52,37 +57,43 @@ class AVByParser:
     
     async def fetch_ads(self, url: str, limit: int = 10) -> List[Dict[str, Any]]:
         """
-        Получает список объявлений по URL фильтра
+        Получает список объявлений по URL фильтра через прокси
         """
         headers = self._get_headers()
+        
+        # Настройка прокси
+        proxy_config = None
+        if self.proxy:
+            proxy_config = self.proxy
+            logger.info(f"Использую прокси: {self.proxy[:20]}...")
         
         async with httpx.AsyncClient(
             follow_redirects=True,
             headers=headers,
             timeout=self.timeout,
-            http2=False  # Отключаем HTTP/2 для совместимости
+            http2=False,
+            proxies=proxy_config
         ) as client:
             try:
-                # Случайная задержка перед запросом (1-3 секунды)
-                delay = random.uniform(1.0, 3.0)
+                # Случайная задержка перед запросом (1-4 секунды)
+                delay = random.uniform(1.0, 4.0)
                 logger.debug(f"Задержка перед запросом: {delay:.1f} сек")
                 await asyncio.sleep(delay)
                 
-                logger.info(f"Запрос к AV.BY: {url}")
+                logger.info(f"Запрос к AV.BY: {url[:80]}...")
                 response = await client.get(url)
                 
                 # Если получили блокировку, пробуем ещё раз с другими заголовками
                 if response.status_code == 468:
                     logger.warning(f"Получен код 468 (блокировка). Пробую с другими заголовками...")
-                    # Ждём дольше и пробуем снова
                     await asyncio.sleep(random.uniform(3.0, 5.0))
-                    headers = self._get_headers()  # Новые случайные заголовки
+                    headers = self._get_headers()
                     response = await client.get(url)
                 
                 if response.status_code != 200:
                     logger.error(f"HTTP ошибка: {response.status_code}")
                     if response.status_code == 468:
-                        logger.warning("AV.BY заблокировал запрос. Возможно, нужен прокси.")
+                        logger.error("AV.BY заблокировал запрос. Проверьте прокси или попробуйте другой.")
                     return []
                 
                 soup = BeautifulSoup(response.text, 'lxml')
@@ -92,11 +103,9 @@ class AVByParser:
                 if not items:
                     items = soup.select('div.listing-item')
                 if not items:
-                    # Пробуем найти любые ссылки на объявления
                     items = soup.select('a[href*="/bmw/"], a[href*="/audi/"], a[href*="/mercedes/"]')
-                    logger.info(f"Найдено ссылок на объявления: {len(items)}")
                 
-                logger.info(f"Найдено карточек: {len(items)}")
+                logger.info(f"Найдено элементов для парсинга: {len(items)}")
                 
                 ads = []
                 for item in items[:limit]:
@@ -106,14 +115,16 @@ class AVByParser:
                 
                 logger.info(f"Успешно распарсено: {len(ads)}")
                 
-                if not ads and items:
-                    # Сохраняем HTML для отладки
+                if not ads and response.status_code == 200:
                     with open("debug_no_ads.html", "w", encoding="utf-8") as f:
                         f.write(response.text)
                     logger.warning("Не удалось распарсить объявления. HTML сохранён в debug_no_ads.html")
                 
                 return ads
                 
+            except httpx.ProxyError as e:
+                logger.error(f"Ошибка прокси: {e}")
+                return []
             except httpx.TimeoutException:
                 logger.error(f"Таймаут при запросе к {url}")
                 return []
@@ -125,7 +136,6 @@ class AVByParser:
         """Парсит одну карточку объявления"""
         try:
             # ----- ССЫЛКА И ID -----
-            # Если item — это ссылка, берём её
             if item.name == 'a':
                 link_tag = item
             else:
@@ -140,19 +150,15 @@ class AVByParser:
             if not href:
                 return None
             
-            # Находим все группы цифр в ссылке и берём последнюю
             numbers = re.findall(r'\d+', href)
             if not numbers:
                 return None
             
             ad_id = numbers[-1]
-            
-            # Проверяем, что ID похож на реальный (минимум 5 цифр)
             if len(ad_id) < 5:
                 logger.warning(f"Подозрительно короткий ID: {ad_id} из {href}")
                 return None
             
-            # Полный URL объявления
             if href.startswith('/'):
                 full_url = f"https://cars.av.by{href}"
             else:
@@ -198,7 +204,7 @@ class AVByParser:
             if city_tag:
                 city = city_tag.text.strip()
             
-            # ----- ДАТА ПУБЛИКАЦИИ -----
+            # ----- ДАТА -----
             date = None
             date_tag = item.select_one('.listing-item__date')
             if date_tag:
@@ -222,13 +228,14 @@ class AVByParser:
 
 async def test_parser():
     """Тестовая функция для проверки парсера"""
+    # Для теста можно указать прокси явно
+    # parser = AVByParser(proxy="http://user:pass@ip:port")
     parser = AVByParser()
     
-    # Тестовая ссылка (BMW 5 серия, сначала новые)
     test_url = "https://cars.av.by/filter?brands[0][brand]=8&brands[0][model]=5865&sort=4"
     
     print(f"\n🔍 Тестируем парсер AV.BY на: {test_url}\n")
-    print("⏳ Пожалуйста, подождите... (запрос может занять несколько секунд)\n")
+    print("⏳ Пожалуйста, подождите...\n")
     
     ads = await parser.fetch_ads(test_url, limit=5)
     
