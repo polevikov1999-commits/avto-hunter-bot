@@ -1,14 +1,15 @@
 """
-Парсер AV.BY через Playwright (обходит ошибку 468)
+Асинхронный клиент для парсинга AV.BY (без Playwright)
 """
 import asyncio
 import re
 import sys
 import os
+import random
 from typing import List, Optional, Dict, Any
 
+import httpx
 from bs4 import BeautifulSoup
-from playwright.async_api import async_playwright
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from utils.logger import get_logger
@@ -17,111 +18,121 @@ logger = get_logger('parser')
 
 
 class AVByParser:
-    """Парсер для cars.av.by (Playwright)"""
+    """Парсер для cars.av.by через httpx с улучшенной маскировкой"""
     
     def __init__(self):
-        self.user_agent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+        self.timeout = 30.0
+    
+    def _get_headers(self) -> Dict[str, str]:
+        """Генерирует случайные заголовки для каждого запроса"""
+        user_agents = [
+            'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+            'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36',
+            'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
+            'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:109.0) Gecko/20100101 Firefox/121.0',
+            'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:109.0) Gecko/20100101 Firefox/122.0',
+        ]
+        
+        return {
+            'User-Agent': random.choice(user_agents),
+            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8',
+            'Accept-Language': 'ru-RU,ru;q=0.9,en-US;q=0.8,en;q=0.7',
+            'Accept-Encoding': 'gzip, deflate, br',
+            'Connection': 'keep-alive',
+            'Upgrade-Insecure-Requests': '1',
+            'Sec-Fetch-Dest': 'document',
+            'Sec-Fetch-Mode': 'navigate',
+            'Sec-Fetch-Site': 'none',
+            'Sec-Fetch-User': '?1',
+            'Cache-Control': 'max-age=0',
+            'sec-ch-ua': '"Not A(Brand";v="99", "Google Chrome";v="121", "Chromium";v="121"',
+            'sec-ch-ua-mobile': '?0',
+            'sec-ch-ua-platform': '"Windows"',
+        }
     
     async def fetch_ads(self, url: str, limit: int = 10) -> List[Dict[str, Any]]:
         """
-        Получает список объявлений по URL фильтра через Playwright
-        Обходит ошибку 468 (блокировка ботов)
+        Получает список объявлений по URL фильтра
         """
-        async with async_playwright() as p:
-            # Запускаем браузер в фоновом режиме
-            browser = await p.chromium.launch(headless=True)
-            
-            # Создаём контекст с параметрами реального браузера
-            context = await browser.new_context(
-                user_agent=self.user_agent,
-                viewport={'width': 1920, 'height': 1080},
-                locale='ru-RU'
-            )
-            
-            # Добавляем скрипт для скрытия признаков автоматизации
-            await context.add_init_script("""
-                Object.defineProperty(navigator, 'webdriver', {
-                    get: () => undefined
-                });
-                Object.defineProperty(navigator, 'plugins', {
-                    get: () => [1, 2, 3, 4, 5]
-                });
-                Object.defineProperty(navigator, 'languages', {
-                    get: () => ['ru-RU', 'ru', 'en']
-                });
-                window.chrome = { runtime: {} };
-            """)
-            
-            page = await context.new_page()
-            
+        headers = self._get_headers()
+        
+        async with httpx.AsyncClient(
+            follow_redirects=True,
+            headers=headers,
+            timeout=self.timeout,
+            http2=False  # Отключаем HTTP/2 для совместимости
+        ) as client:
             try:
-                logger.info(f"Запрос к AV.BY (Playwright): {url}")
+                # Случайная задержка перед запросом (1-3 секунды)
+                delay = random.uniform(1.0, 3.0)
+                logger.debug(f"Задержка перед запросом: {delay:.1f} сек")
+                await asyncio.sleep(delay)
                 
-                # Переходим по ссылке, ждём загрузки контента
-                await page.goto(url, wait_until='domcontentloaded', timeout=30000)
+                logger.info(f"Запрос к AV.BY: {url}")
+                response = await client.get(url)
                 
-                # Имитация поведения человека: небольшой скролл и пауза
-                await page.evaluate("window.scrollTo(0, document.body.scrollHeight / 3)")
-                await asyncio.sleep(0.5)
+                # Если получили блокировку, пробуем ещё раз с другими заголовками
+                if response.status_code == 468:
+                    logger.warning(f"Получен код 468 (блокировка). Пробую с другими заголовками...")
+                    # Ждём дольше и пробуем снова
+                    await asyncio.sleep(random.uniform(3.0, 5.0))
+                    headers = self._get_headers()  # Новые случайные заголовки
+                    response = await client.get(url)
                 
-                # Ждём появления карточек объявлений
-                try:
-                    await page.wait_for_selector('div.listing-item__wrap', timeout=15000)
-                except:
-                    try:
-                        await page.wait_for_selector('div.listing-item', timeout=10000)
-                    except:
-                        logger.warning("Карточки объявлений не найдены на странице")
+                if response.status_code != 200:
+                    logger.error(f"HTTP ошибка: {response.status_code}")
+                    if response.status_code == 468:
+                        logger.warning("AV.BY заблокировал запрос. Возможно, нужен прокси.")
+                    return []
                 
-                # Получаем HTML страницы для парсинга
-                html = await page.content()
-                soup = BeautifulSoup(html, 'lxml')
+                soup = BeautifulSoup(response.text, 'lxml')
                 
-                # Ищем карточки объявлений
+                # Пробуем найти карточки разными способами
                 items = soup.select('div.listing-item__wrap')
                 if not items:
                     items = soup.select('div.listing-item')
+                if not items:
+                    # Пробуем найти любые ссылки на объявления
+                    items = soup.select('a[href*="/bmw/"], a[href*="/audi/"], a[href*="/mercedes/"]')
+                    logger.info(f"Найдено ссылок на объявления: {len(items)}")
                 
                 logger.info(f"Найдено карточек: {len(items)}")
                 
-                # Парсим каждую карточку
                 ads = []
                 for item in items[:limit]:
                     ad = self._parse_item(item)
                     if ad and ad.get('id'):
                         ads.append(ad)
-                    else:
-                        logger.debug(f"Не удалось распарсить карточку")
                 
                 logger.info(f"Успешно распарсено: {len(ads)}")
                 
-                # Если объявления не найдены, сохраняем HTML для отладки
-                if not ads:
+                if not ads and items:
+                    # Сохраняем HTML для отладки
                     with open("debug_no_ads.html", "w", encoding="utf-8") as f:
-                        f.write(html)
+                        f.write(response.text)
                     logger.warning("Не удалось распарсить объявления. HTML сохранён в debug_no_ads.html")
                 
-                await browser.close()
                 return ads
                 
+            except httpx.TimeoutException:
+                logger.error(f"Таймаут при запросе к {url}")
+                return []
             except Exception as e:
                 logger.error(f"Ошибка при парсинге: {e}")
-                # Сохраняем скриншот для отладки
-                try:
-                    await page.screenshot(path="playwright_error.png")
-                    logger.info("Скриншот ошибки сохранён в playwright_error.png")
-                except:
-                    pass
-                await browser.close()
                 return []
     
     def _parse_item(self, item) -> Optional[Dict[str, Any]]:
         """Парсит одну карточку объявления"""
         try:
-            # ----- ССЫЛКА И ID (берём последнюю группу цифр) -----
-            link_tag = item.select_one('a.listing-item__link')
-            if not link_tag:
-                link_tag = item.select_one('a')
+            # ----- ССЫЛКА И ID -----
+            # Если item — это ссылка, берём её
+            if item.name == 'a':
+                link_tag = item
+            else:
+                link_tag = item.select_one('a.listing-item__link')
+                if not link_tag:
+                    link_tag = item.select_one('a')
+            
             if not link_tag:
                 return None
             
@@ -132,7 +143,6 @@ class AVByParser:
             # Находим все группы цифр в ссылке и берём последнюю
             numbers = re.findall(r'\d+', href)
             if not numbers:
-                logger.debug(f"Нет цифр в ссылке: {href}")
                 return None
             
             ad_id = numbers[-1]
@@ -149,7 +159,9 @@ class AVByParser:
                 full_url = href
             
             # ----- НАЗВАНИЕ -----
-            title_tag = item.select_one('.listing-item__title .link-text')
+            title_tag = link_tag.select_one('.link-text')
+            if not title_tag:
+                title_tag = item.select_one('.listing-item__title .link-text')
             if not title_tag:
                 title_tag = item.select_one('.listing-item__title')
             title = title_tag.text.strip() if title_tag else "Без названия"
@@ -157,6 +169,8 @@ class AVByParser:
             # ----- ЦЕНА -----
             price = None
             price_tag = item.select_one('.listing-item__price-primary')
+            if not price_tag:
+                price_tag = item.select_one('.price')
             if price_tag:
                 price_text = price_tag.text.strip()
                 digits = re.sub(r'[^\d]', '', price_text)
@@ -174,7 +188,7 @@ class AVByParser:
             
             # ----- ГОД -----
             year = None
-            year_match = re.search(r'(\d{4})', item.text)
+            year_match = re.search(r'(\d{4})', item.text if hasattr(item, 'text') else '')
             if year_match:
                 year = int(year_match.group(1))
             
@@ -206,7 +220,6 @@ class AVByParser:
             return None
 
 
-# ==================== ТЕСТОВАЯ ФУНКЦИЯ ====================
 async def test_parser():
     """Тестовая функция для проверки парсера"""
     parser = AVByParser()
@@ -214,8 +227,8 @@ async def test_parser():
     # Тестовая ссылка (BMW 5 серия, сначала новые)
     test_url = "https://cars.av.by/filter?brands[0][brand]=8&brands[0][model]=5865&sort=4"
     
-    print(f"\n🔍 Тестируем парсер AV.BY (Playwright) на: {test_url}\n")
-    print("⏳ Пожалуйста, подождите... (парсинг через браузер может занять 5-10 секунд)\n")
+    print(f"\n🔍 Тестируем парсер AV.BY на: {test_url}\n")
+    print("⏳ Пожалуйста, подождите... (запрос может занять несколько секунд)\n")
     
     ads = await parser.fetch_ads(test_url, limit=5)
     
@@ -233,10 +246,7 @@ async def test_parser():
             print("-" * 50)
     else:
         print("❌ Объявления не найдены.")
-        print("Возможные причины:")
-        print("  - AV.BY изменил структуру страницы")
-        print("  - Ошибка при загрузке страницы (проверьте playwright_error.png)")
-        print("  - Ссылка неактивна")
+        print("Проверьте файл debug_no_ads.html")
 
 
 if __name__ == "__main__":
