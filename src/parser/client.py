@@ -61,19 +61,25 @@ class AVByParser:
         """
         headers = self._get_headers()
         
-        # Настройка прокси
+        # Настройка прокси (используем 'proxy', не 'proxies')
         proxy_config = None
         if self.proxy:
             proxy_config = self.proxy
-            logger.info(f"Использую прокси: {self.proxy[:20]}...")
+            logger.info(f"Использую прокси: {self.proxy[:30]}...")
         
-        async with httpx.AsyncClient(
-            follow_redirects=True,
-            headers=headers,
-            timeout=self.timeout,
-            http2=False,
-            proxies=proxy_config
-        ) as client:
+        # Создаём клиент с поддержкой прокси
+        client_kwargs = {
+            'follow_redirects': True,
+            'headers': headers,
+            'timeout': self.timeout,
+            'http2': False,
+        }
+        
+        # Добавляем прокси, если он есть (httpx использует 'proxy', не 'proxies')
+        if proxy_config:
+            client_kwargs['proxy'] = proxy_config
+        
+        async with httpx.AsyncClient(**client_kwargs) as client:
             try:
                 # Случайная задержка перед запросом (1-4 секунды)
                 delay = random.uniform(1.0, 4.0)
@@ -88,6 +94,7 @@ class AVByParser:
                     logger.warning(f"Получен код 468 (блокировка). Пробую с другими заголовками...")
                     await asyncio.sleep(random.uniform(3.0, 5.0))
                     headers = self._get_headers()
+                    client.headers = headers
                     response = await client.get(url)
                 
                 if response.status_code != 200:
@@ -228,8 +235,6 @@ class AVByParser:
 
 async def test_parser():
     """Тестовая функция для проверки парсера"""
-    # Для теста можно указать прокси явно
-    # parser = AVByParser(proxy="http://user:pass@ip:port")
     parser = AVByParser()
     
     test_url = "https://cars.av.by/filter?brands[0][brand]=8&brands[0][model]=5865&sort=4"
