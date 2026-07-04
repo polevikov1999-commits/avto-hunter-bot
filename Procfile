@@ -1,1 +1,1 @@
-web: playwright install chromium && python src/bot.py
+web: sh startup.sh
