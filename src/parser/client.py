@@ -136,13 +136,19 @@ class AVByParser:
         """
         headers = self._get_headers()
         
-        async with httpx.AsyncClient(
-            follow_redirects=True,
-            headers=headers,
-            timeout=self.timeout,
-            http2=False,
-            proxies=proxy
-        ) as client:
+        # Настройка клиента с правильным параметром "proxy" (единственное число)
+        client_kwargs = {
+            'follow_redirects': True,
+            'headers': headers,
+            'timeout': self.timeout,
+            'http2': False,
+        }
+        
+        # Добавляем прокси, если он есть
+        if proxy:
+            client_kwargs['proxy'] = proxy  # <-- ИСПРАВЛЕНО: proxy (единственное число)
+        
+        async with httpx.AsyncClient(**client_kwargs) as client:
             try:
                 # Случайная задержка
                 delay = random.uniform(1.0, 4.0)
@@ -291,6 +297,8 @@ class AVByParser:
 
 async def test_parser():
     """Тестовая функция"""
+    # Для теста можно указать прокси явно
+    # parser = AVByParser(proxies=["http://user:pass@ip:port"])
     parser = AVByParser()
     
     test_url = "https://cars.av.by/filter?brands[0][brand]=8&brands[0][model]=5865&sort=4"
