@@ -358,7 +358,44 @@ async def cmd_profile(message: types.Message):
         f"🎯 Фильтров: {filters_count}/{MAX_FREE_FILTERS if not is_premium else '∞'}\n"
         f"📅 Дата регистрации: {message.from_user.date}",
         parse_mode="HTML"
+    )@dp.message(Command("profile"))
+async def cmd_profile(message: types.Message):
+    """Профиль пользователя"""
+    user_id = message.from_user.id
+    filters_count = count_user_filters(user_id)
+    is_premium = check_premium(user_id)
+    
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    
+    # Получаем дату регистрации из БД
+    cursor.execute('SELECT created_at FROM users WHERE user_id = ?', (user_id,))
+    row = cursor.fetchone()
+    created_at = row[0] if row else "неизвестно"
+    
+    # Получаем информацию о подписке
+    cursor.execute('SELECT expires_at FROM subscriptions WHERE user_id = ?', (user_id,))
+    sub_row = cursor.fetchone()
+    conn.close()
+    
+    if is_premium and sub_row and sub_row[0]:
+        try:
+            expires = datetime.strptime(sub_row[0], '%Y-%m-%d %H:%M:%S')
+            days_left = (expires - datetime.now()).days
+            status = f"🟢 Премиум (осталось {days_left} дней)"
+        except:
+            status = "🟢 Премиум (активна)"
+    else:
+        status = f"🟡 Бесплатный ({MAX_FREE_FILTERS} фильтра, проверка раз в 30 минут)"
+    
+    await message.answer(
+        f"👤 <b>Ваш профиль</b>\n\n"
+        f"📊 Статус: {status}\n"
+        f"🎯 Фильтров: {filters_count}/{MAX_FREE_FILTERS if not is_premium else '∞'}\n"
+        f"📅 Дата регистрации: {created_at}",
+        parse_mode="HTML"
     )
+
 
 
 @dp.message(Command("promo"))
