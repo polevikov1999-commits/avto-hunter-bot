@@ -1,5 +1,5 @@
 """
-Асинхронный клиент для парсинга AV.BY с ротацией прокси
+Асинхронный клиент для парсинга AV.BY с поддержкой прокси
 """
 import asyncio
 import re
@@ -18,59 +18,14 @@ logger = get_logger('parser')
 
 
 class AVByParser:
-    """Парсер для cars.av.by с ротацией прокси"""
+    """Парсер для cars.av.by с поддержкой прокси"""
     
-    def __init__(self, proxies: List[str] = None):
-        """
-        Args:
-            proxies: Список прокси-серверов (например, ['http://user:pass@ip1:port', 'http://user:pass@ip2:port'])
-        """
+    def __init__(self, proxy: str = None):
         self.timeout = 30.0
-        
-        # Загружаем прокси из переменной окружения или из аргументов
-        if proxies:
-            self.proxies = proxies
-        else:
-            proxy_list_str = os.getenv("PROXY_LIST", "")
-            if proxy_list_str:
-                self.proxies = [p.strip() for p in proxy_list_str.split(",") if p.strip()]
-            else:
-                self.proxies = []
-        
-        # Текущий прокси (для повторных попыток)
-        self._current_proxy = None
-        self._failed_proxies = set()  # Прокси, на которых была ошибка
-        
-        logger.info(f"Загружено прокси: {len(self.proxies)}")
-        if self.proxies:
-            for i, p in enumerate(self.proxies):
-                # Скрываем пароль для логов
-                masked = re.sub(r':[^@]+@', ':***@', p)
-                logger.info(f"  Прокси {i+1}: {masked}")
-    
-    def _get_random_proxy(self) -> Optional[str]:
-        """Возвращает случайный прокси из списка, исключая неудачные"""
-        available = [p for p in self.proxies if p not in self._failed_proxies]
-        if not available:
-            logger.warning("Все прокси были отмечены как неудачные. Сбрасываю список.")
-            self._failed_proxies.clear()
-            available = self.proxies
-        
-        if not available:
-            return None
-        
-        proxy = random.choice(available)
-        self._current_proxy = proxy
-        return proxy
-    
-    def _mark_proxy_failed(self, proxy: str):
-        """Отмечает прокси как неудачный"""
-        if proxy and proxy not in self._failed_proxies:
-            self._failed_proxies.add(proxy)
-            logger.warning(f"Прокси помечен как неудачный: {proxy[:20]}...")
+        self.proxy = proxy or os.getenv("PROXY_URL")
     
     def _get_headers(self) -> Dict[str, str]:
-        """Генерирует случайные заголовки для каждого запроса"""
+        """Генерирует случайные заголовки"""
         user_agents = [
             'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
             'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36',
@@ -97,77 +52,41 @@ class AVByParser:
         }
     
     async def fetch_ads(self, url: str, limit: int = 10) -> List[Dict[str, Any]]:
-        """
-        Получает список объявлений по URL фильтра с ротацией прокси
-        """
-        # Пробуем максимум 3 разных прокси
-        max_attempts = min(3, len(self.proxies)) if self.proxies else 1
-        
-        for attempt in range(max_attempts):
-            proxy = self._get_random_proxy() if self.proxies else None
-            
-            # Логируем попытку
-            if proxy:
-                masked = re.sub(r':[^@]+@', ':***@', proxy)
-                logger.info(f"Попытка {attempt+1}/{max_attempts} с прокси: {masked[:30]}...")
-            else:
-                logger.info(f"Попытка {attempt+1}/{max_attempts} без прокси")
-            
-            result = await self._fetch_single(url, limit, proxy)
-            
-            # Если успешно — возвращаем результат
-            if result is not None:
-                return result
-            
-            # Если прокси не сработал — помечаем его
-            if proxy:
-                self._mark_proxy_failed(proxy)
-            
-            # Ждём перед следующей попыткой
-            await asyncio.sleep(random.uniform(1.0, 3.0))
-        
-        logger.error(f"Все попытки (макс {max_attempts}) не удались для {url}")
-        return []
-    
-    async def _fetch_single(self, url: str, limit: int, proxy: Optional[str]) -> Optional[List[Dict[str, Any]]]:
-        """
-        Одиночный запрос с одним прокси
-        Возвращает None при ошибке, иначе список объявлений
-        """
+        """Получает список объявлений по URL фильтра"""
         headers = self._get_headers()
+        proxy = self.proxy
         
-        # Настройка клиента с правильным параметром "proxy" (единственное число)
-        client_kwargs = {
-            'follow_redirects': True,
-            'headers': headers,
-            'timeout': self.timeout,
-            'http2': False,
-        }
-        
-        # Добавляем прокси, если он есть
         if proxy:
-            client_kwargs['proxy'] = proxy  # <-- ИСПРАВЛЕНО: proxy (единственное число)
+            logger.debug(f"Использую прокси: {proxy[:30]}...")
         
-        async with httpx.AsyncClient(**client_kwargs) as client:
+        async with httpx.AsyncClient(
+            follow_redirects=True,
+            headers=headers,
+            timeout=self.timeout,
+            http2=False,
+            proxies=proxy
+        ) as client:
             try:
-                # Случайная задержка
-                delay = random.uniform(1.0, 4.0)
+                delay = random.uniform(1.0, 3.0)
                 await asyncio.sleep(delay)
                 
-                logger.debug(f"Запрос к AV.BY: {url[:80]}...")
+                logger.info(f"Запрос к AV.BY: {url[:80]}...")
                 response = await client.get(url)
                 
                 if response.status_code == 468:
-                    logger.warning("Получен код 468 (блокировка)")
-                    return None
+                    logger.warning("Получен код 468 (блокировка). Пробую с другими заголовками...")
+                    await asyncio.sleep(random.uniform(3.0, 5.0))
+                    headers = self._get_headers()
+                    response = await client.get(url)
                 
                 if response.status_code != 200:
                     logger.error(f"HTTP ошибка: {response.status_code}")
-                    return None
+                    if response.status_code == 468:
+                        logger.error("AV.BY заблокировал запрос. Проверьте прокси.")
+                    return []
                 
                 soup = BeautifulSoup(response.text, 'lxml')
                 
-                # Пробуем найти карточки
                 items = soup.select('div.listing-item__wrap')
                 if not items:
                     items = soup.select('div.listing-item')
@@ -193,18 +112,17 @@ class AVByParser:
                 
             except httpx.ProxyError as e:
                 logger.error(f"Ошибка прокси: {e}")
-                return None
+                return []
             except httpx.TimeoutException:
-                logger.error("Таймаут")
-                return None
+                logger.error(f"Таймаут при запросе")
+                return []
             except Exception as e:
-                logger.error(f"Ошибка: {e}")
-                return None
+                logger.error(f"Ошибка при парсинге: {e}")
+                return []
     
     def _parse_item(self, item) -> Optional[Dict[str, Any]]:
         """Парсит одну карточку объявления"""
         try:
-            # ----- ССЫЛКА И ID -----
             if item.name == 'a':
                 link_tag = item
             else:
@@ -225,7 +143,6 @@ class AVByParser:
             
             ad_id = numbers[-1]
             if len(ad_id) < 5:
-                logger.warning(f"Подозрительно короткий ID: {ad_id} из {href}")
                 return None
             
             if href.startswith('/'):
@@ -233,7 +150,6 @@ class AVByParser:
             else:
                 full_url = href
             
-            # ----- НАЗВАНИЕ -----
             title_tag = link_tag.select_one('.link-text')
             if not title_tag:
                 title_tag = item.select_one('.listing-item__title .link-text')
@@ -241,7 +157,6 @@ class AVByParser:
                 title_tag = item.select_one('.listing-item__title')
             title = title_tag.text.strip() if title_tag else "Без названия"
             
-            # ----- ЦЕНА -----
             price = None
             price_tag = item.select_one('.listing-item__price-primary')
             if not price_tag:
@@ -252,7 +167,6 @@ class AVByParser:
                 if digits:
                     price = int(digits)
             
-            # ----- ПРОБЕГ -----
             mileage = None
             mileage_span = item.select_one('.listing-item__params span')
             if mileage_span:
@@ -261,19 +175,16 @@ class AVByParser:
                 if digits:
                     mileage = int(digits)
             
-            # ----- ГОД -----
             year = None
             year_match = re.search(r'(\d{4})', item.text if hasattr(item, 'text') else '')
             if year_match:
                 year = int(year_match.group(1))
             
-            # ----- ГОРОД -----
             city = None
             city_tag = item.select_one('.listing-item__location')
             if city_tag:
                 city = city_tag.text.strip()
             
-            # ----- ДАТА -----
             date = None
             date_tag = item.select_one('.listing-item__date')
             if date_tag:
@@ -289,40 +200,6 @@ class AVByParser:
                 'city': city,
                 'date': date,
             }
-            
         except Exception as e:
             logger.error(f"Ошибка парсинга карточки: {e}")
             return None
-
-
-async def test_parser():
-    """Тестовая функция"""
-    # Для теста можно указать прокси явно
-    # parser = AVByParser(proxies=["http://user:pass@ip:port"])
-    parser = AVByParser()
-    
-    test_url = "https://cars.av.by/filter?brands[0][brand]=8&brands[0][model]=5865&sort=4"
-    
-    print(f"\n🔍 Тестируем парсер AV.BY на: {test_url}\n")
-    print("⏳ Пожалуйста, подождите...\n")
-    
-    ads = await parser.fetch_ads(test_url, limit=5)
-    
-    if ads:
-        print(f"✅ Найдено {len(ads)} объявлений:\n")
-        for ad in ads:
-            print(f"ID: {ad['id']}")
-            print(f"Название: {ad['title']}")
-            print(f"Цена: {ad['price']} BYN")
-            print(f"Год: {ad['year']}")
-            print(f"Пробег: {ad['mileage']} км")
-            print(f"Город: {ad['city']}")
-            print(f"Дата: {ad['date']}")
-            print(f"URL: {ad['url']}")
-            print("-" * 50)
-    else:
-        print("❌ Объявления не найдены.")
-
-
-if __name__ == "__main__":
-    asyncio.run(test_parser())

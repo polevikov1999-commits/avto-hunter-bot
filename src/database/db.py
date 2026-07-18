@@ -1,7 +1,7 @@
 import sqlite3
 import logging
 from typing import List, Dict, Optional
-from datetime import datetime
+from datetime import datetime, timedelta
 
 logger = logging.getLogger(__name__)
 
@@ -60,6 +60,40 @@ def init_db():
             message TEXT NOT NULL,
             replied BOOLEAN DEFAULT 0,
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+    ''')
+    
+    # Таблица промокодов
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS promo_codes (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            code TEXT UNIQUE NOT NULL,
+            days INTEGER NOT NULL,
+            max_uses INTEGER DEFAULT 1,
+            used_count INTEGER DEFAULT 0,
+            created_by INTEGER,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+    ''')
+    
+    # Таблица подписок
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS subscriptions (
+            user_id INTEGER PRIMARY KEY,
+            subscription_type TEXT DEFAULT 'free',
+            expires_at TIMESTAMP,
+            activated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+    ''')
+    
+    # Таблица использованных промокодов
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS used_promo (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER,
+            promo_code TEXT,
+            used_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY (user_id) REFERENCES users(user_id)
         )
     ''')
     
@@ -253,3 +287,62 @@ def mark_feedback_replied(feedback_id: int):
     ''', (feedback_id,))
     conn.commit()
     conn.close()
+
+
+# ---------- ПОДПИСКИ ----------
+def check_premium(user_id: int) -> bool:
+    """Проверка, активна ли премиум-подписка у пользователя"""
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    cursor.execute('''
+        SELECT expires_at FROM subscriptions
+        WHERE user_id = ? AND subscription_type = 'premium'
+    ''', (user_id,))
+    row = cursor.fetchone()
+    conn.close()
+    
+    if not row:
+        return False
+    
+    try:
+        expires = datetime.strptime(row[0], '%Y-%m-%d %H:%M:%S')
+        return expires > datetime.now()
+    except:
+        return False
+
+
+def activate_premium(user_id: int, days: int) -> bool:
+    """Активация премиум-подписки на N дней"""
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    
+    try:
+        # Проверяем, есть ли уже подписка
+        cursor.execute('''
+            SELECT expires_at FROM subscriptions WHERE user_id = ?
+        ''', (user_id,))
+        row = cursor.fetchone()
+        
+        if row and row[0]:
+            try:
+                expires = datetime.strptime(row[0], '%Y-%m-%d %H:%M:%S')
+                if expires > datetime.now():
+                    new_expires = expires + timedelta(days=days)
+                else:
+                    new_expires = datetime.now() + timedelta(days=days)
+            except:
+                new_expires = datetime.now() + timedelta(days=days)
+        else:
+            new_expires = datetime.now() + timedelta(days=days)
+        
+        cursor.execute('''
+            INSERT OR REPLACE INTO subscriptions (user_id, subscription_type, expires_at)
+            VALUES (?, 'premium', ?)
+        ''', (user_id, new_expires.strftime('%Y-%m-%d %H:%M:%S')))
+        conn.commit()
+        return True
+    except Exception as e:
+        logger.error(f"Ошибка активации премиума: {e}")
+        return False
+    finally:
+        conn.close()

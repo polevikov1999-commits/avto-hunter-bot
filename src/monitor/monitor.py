@@ -13,7 +13,8 @@ from parser.client import AVByParser
 from notifier import send_new_ad_notification
 from database.db import (
     update_first_ad_id, update_last_checked,
-    is_ad_seen, mark_ad_seen, clear_old_seen_ads
+    is_ad_seen, mark_ad_seen, clear_old_seen_ads,
+    check_premium, count_user_filters
 )
 from utils.logger import get_logger
 
@@ -24,6 +25,11 @@ class Monitor:
     """Класс для фонового мониторинга (по позиции объявления в выдаче)"""
     
     def __init__(self, check_interval: int = 300, ads_limit: int = 20):
+        """
+        Args:
+            check_interval: Интервал проверки в секундах (по умолчанию 5 минут)
+            ads_limit: Количество объявлений для парсинга при каждой проверке
+        """
         self.check_interval = check_interval
         self.ads_limit = ads_limit
         self.parser = AVByParser()
@@ -31,6 +37,7 @@ class Monitor:
         self.db_path = "av_bot.db"
     
     def _get_all_active_filters(self):
+        """Получение всех активных фильтров из БД"""
         conn = sqlite3.connect(self.db_path)
         cursor = conn.cursor()
         cursor.execute('''
@@ -50,6 +57,7 @@ class Monitor:
         } for row in rows]
     
     async def check_all_filters(self):
+        """Проверка всех активных фильтров всех пользователей"""
         logger.info("🔄 Начинаю проверку всех фильтров...")
         
         filters = self._get_all_active_filters()
@@ -57,6 +65,11 @@ class Monitor:
         
         for filter_info in filters:
             try:
+                # Проверяем, премиум ли пользователь
+                is_premium = check_premium(filter_info['user_id'])
+                
+                # Премиум: проверка раз в 5 минут, бесплатный: раз в 30 минут
+                # Интервал уже задан в расписании, но можно добавить логику пропуска
                 await self._check_filter(
                     filter_info['id'],
                     filter_info['user_id'],
@@ -70,6 +83,7 @@ class Monitor:
         logger.info("✅ Проверка всех фильтров завершена")
     
     async def _check_filter(self, filter_id: int, user_id: int, url: str, last_first_ad_id: str):
+        """Проверка одного фильтра"""
         logger.info(f"🔍 Проверяю фильтр {filter_id} для пользователя {user_id}")
         
         ads = await self.parser.fetch_ads(url, limit=self.ads_limit)
@@ -137,6 +151,7 @@ class Monitor:
                 logger.info(f"Фильтр {filter_id}: нет непрочитанных новых объявлений")
     
     async def run(self):
+        """Запуск бесконечного цикла мониторинга"""
         logger.info(f"🟢 Монитор запущен. Интервал проверки: {self.check_interval} сек. Лимит объявлений: {self.ads_limit}")
         
         while self.running:
@@ -148,5 +163,6 @@ class Monitor:
             await asyncio.sleep(self.check_interval)
     
     def stop(self):
+        """Остановка монитора"""
         self.running = False
         logger.info("🔴 Монитор остановлен")

@@ -2,19 +2,26 @@ import asyncio
 import sys
 import os
 import logging
-from aiogram.fsm.context import FSMContext
-from aiogram.fsm.state import State, StatesGroup
+import json
+import sqlite3
+from datetime import datetime, timedelta
+import pytz
+import time
 
+# Добавляем путь к модулям
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 
 from aiogram import Bot, Dispatcher, types, F
 from aiogram.filters import Command
-from aiogram.types import InlineKeyboardButton
+from aiogram.types import KeyboardButton, WebAppInfo, ReplyKeyboardMarkup, InlineKeyboardButton
 from aiogram.utils.keyboard import InlineKeyboardBuilder
+from aiogram.fsm.context import FSMContext
+from aiogram.fsm.state import State, StatesGroup
 
 from database.db import (
-    init_db, add_user, add_filter, get_user_filters,
-    delete_filter, count_user_filters, is_admin
+    init_db, add_user, add_filter, get_user_filters, delete_filter,
+    count_user_filters, is_admin, check_premium, activate_premium,
+    add_feedback
 )
 from parser.client import AVByParser
 from monitor.monitor import Monitor
@@ -23,11 +30,26 @@ from admin import register_admin_handlers, set_admin_id
 from utils.logger import setup_logger
 
 # ==================== НАСТРОЙКИ ====================
-BOT_TOKEN = "8985781891:AAF144OyAVnWey45sfflwbVyKLWzD35gWtY"          # Замените на ваш токен
-ADMIN_ID = 7935728554                   # Замените на ваш Telegram ID
+BOT_TOKEN = "8985781891:AAF144OyAVnWey45sfflwbVyKLWzD35gWtY"  # Замените на ваш токен
+ADMIN_ID = 7935728554  # Замените на ваш Telegram ID
+WEBAPP_URL = "https://polevikov1999-commits.github.io/avto-hunter-webapp/"  # Ссылка на мини-приложение
 
 # Ограничения для бесплатных пользователей
 MAX_FREE_FILTERS = 3
+
+# ==================== ВРЕМЕННАЯ ЗОНА ====================
+os.environ['TZ'] = 'Europe/Minsk'
+try:
+    time.tzset()
+except AttributeError:
+    pass
+
+def get_minsk_time():
+    tz = pytz.timezone('Europe/Minsk')
+    return datetime.now(tz)
+
+def format_time(dt):
+    return dt.strftime('%Y-%m-%d %H:%M:%S')
 
 # ==================== ЛОГГЕР ====================
 logger = setup_logger('av_bot', level=logging.INFO)
@@ -45,16 +67,27 @@ logger.info("База данных инициализирована")
 init_notifier(BOT_TOKEN)
 logger.info("Бот для уведомлений инициализирован")
 
-# Устанавливаем ID администратора для admin.py
+# Устанавливаем ID администратора
 set_admin_id(ADMIN_ID)
 
 # Создаём монитор
 monitor = Monitor(check_interval=300, ads_limit=20)
-logger.info("Монитор создан, интервал проверки: 300 сек, лимит объявлений: 20")
+logger.info("Монитор создан")
 
 # Регистрируем административные хендлеры
 register_admin_handlers(dp)
 logger.info("Административные хендлеры зарегистрированы")
+
+# ==================== WEBAPP КНОПКА ====================
+web_app_button = KeyboardButton(
+    text="🔍 Настроить фильтр",
+    web_app=WebAppInfo(url=WEBAPP_URL)
+)
+
+main_keyboard = ReplyKeyboardMarkup(
+    keyboard=[[web_app_button]],
+    resize_keyboard=True
+)
 
 
 # ==================== FSM ДЛЯ ДОБАВЛЕНИЯ ФИЛЬТРА ====================
@@ -69,11 +102,9 @@ async def cmd_start(message: types.Message):
     user = message.from_user
     add_user(user.id, user.username, user.first_name, user.last_name)
     
-    # Если этот пользователь — администратор, обновляем флаг в БД
+    # Если этот пользователь — администратор, обновляем флаг
     if user.id == ADMIN_ID:
-        import sqlite3
-        from database.db import DB_PATH
-        conn = sqlite3.connect(DB_PATH)
+        conn = sqlite3.connect("av_bot.db")
         conn.execute('UPDATE users SET is_admin = 1 WHERE user_id = ?', (user.id,))
         conn.commit()
         conn.close()
@@ -83,21 +114,22 @@ async def cmd_start(message: types.Message):
     
     await message.answer(
         "🚗 <b>«Авто-Хантер» — мониторинг цен на AV.BY</b>\n\n"
-        "Я охочусь за новыми объявлениями на AV.BY и мгновенно приношу их вам в Telegram. "
-        "Больше не нужно каждые 5 минут обновлять страницу — я сделаю это за вас.\n\n"
-        "<b>Как пользоваться:</b>\n"
-        "1️⃣ Настройте фильтры на AV.BY (марка, модель, цена, регион)\n"
-        "2️⃣ Скопируйте ссылку на страницу с результатами\n"
-        "3️⃣ Отправьте команду /track и придумайте название для фильтра\n\n"
-        f"🔥 <b>Бесплатный тариф:</b> до {MAX_FREE_FILTERS} фильтров, проверка раз в 30 минут.\n"
-        "Скоро — больше возможностей!\n\n"
+        "Я охочусь за новыми объявлениями на AV.BY и мгновенно приношу их вам в Telegram.\n\n"
+        "📌 <b>Как пользоваться:</b>\n"
+        "1️⃣ Нажмите кнопку «Настроить фильтр»\n"
+        "2️⃣ Выберите марку и модель\n"
+        "3️⃣ Настройте цену, год и регион\n"
+        "4️⃣ Нажмите «Начать охоту» — фильтр добавится автоматически!\n\n"
+        "📊 <b>Бесплатный тариф:</b> 3 фильтра, проверка раз в 30 минут\n"
+        "💎 <b>Премиум:</b> безлимит фильтров, проверка раз в 5 минут\n\n"
         "<b>Команды:</b>\n"
-        "/track — начать охоту (добавить фильтр)\n"
-        "/list — моя добыча (список фильтров)\n"
-        "/untrack — забыть фильтр (удалить)\n"
-        "/feedback — оставить отзыв или предложение\n"
-        "/help — помощь\n\n"
-        "💡 <b>Совет:</b> Используйте понятные названия для фильтров, например «BMW X5 Минск».",
+        "/list — мои фильтры\n"
+        "/untrack — удалить фильтр\n"
+        "/profile — мой профиль\n"
+        "/promo — активировать промокод\n"
+        "/feedback — отзыв или предложение\n"
+        "/help — помощь",
+        reply_markup=main_keyboard,
         parse_mode="HTML"
     )
 
@@ -106,19 +138,20 @@ async def cmd_start(message: types.Message):
 async def cmd_help(message: types.Message):
     await message.answer(
         "📖 <b>Помощь по «Авто-Хантеру»</b>\n\n"
-        "1. <b>/track</b> — добавить новый фильтр\n"
+        "1. <b>/track</b> — добавить фильтр вручную\n"
         "   • Отправьте ссылку с cars.av.by\n"
         "   • Введите название для фильтра\n\n"
         "2. <b>/list</b> — показать все ваши фильтры\n\n"
         "3. <b>/untrack</b> — удалить фильтр\n\n"
-        "4. <b>/feedback</b> — оставить отзыв\n\n"
+        "4. <b>/profile</b> — информация о вашем профиле\n\n"
+        "5. <b>/promo</b> — активировать промокод\n\n"
+        "6. <b>/feedback</b> — оставить отзыв\n\n"
         f"🔥 <b>Бесплатный тариф:</b> до {MAX_FREE_FILTERS} фильтров, проверка раз в 30 минут.\n\n"
         "<b>Как получить ссылку для /track:</b>\n"
         "• Зайдите на cars.av.by\n"
-        "• Настройте фильтры (марка, модель, цена, регион)\n"
-        "• Нажмите «Показать»\n"
+        "• Настройте фильтры\n"
         "• Скопируйте URL из адресной строки\n\n"
-        "Бот проверяет новые объявления раз в 30 минут для бесплатного тарифа.",
+        "💡 <b>Совет:</b> Используйте кнопку «Настроить фильтр» — это проще и быстрее!",
         parse_mode="HTML"
     )
 
@@ -130,13 +163,15 @@ async def cmd_track(message: types.Message, state: FSMContext):
     
     # Проверяем ограничение по количеству фильтров
     current_filters = count_user_filters(user_id)
-    if current_filters >= MAX_FREE_FILTERS:
+    is_premium = check_premium(user_id)
+    
+    if not is_premium and current_filters >= MAX_FREE_FILTERS:
         await message.answer(
             f"❌ <b>Достигнут лимит фильтров!</b>\n\n"
             f"На бесплатном тарифе можно добавить не более {MAX_FREE_FILTERS} фильтров.\n"
             f"У вас уже {current_filters} фильтр(ов).\n\n"
-            f"Чтобы добавить новый, удалите один из существующих через /untrack.\n"
-            f"Скоро будут доступны платные тарифы с безлимитом!",
+            f"💎 Чтобы добавить больше, активируйте премиум-доступ.\n"
+            f"Введите промокод, если у вас есть: /promo КОД",
             parse_mode="HTML"
         )
         return
@@ -237,16 +272,18 @@ async def cmd_list(message: types.Message):
     user_id = message.from_user.id
     filters = get_user_filters(user_id)
     current_count = len(filters)
+    is_premium = check_premium(user_id)
+    max_filters = MAX_FREE_FILTERS if not is_premium else "∞"
     
     if not filters:
         await message.answer(
             f"📭 У вас нет отслеживаемых фильтров.\n\n"
-            f"Добавьте первый командой /track\n"
-            f"Доступно фильтров: {current_count}/{MAX_FREE_FILTERS}"
+            f"Добавьте первый через кнопку «Настроить фильтр» или командой /track\n"
+            f"Доступно фильтров: {current_count}/{max_filters}"
         )
         return
     
-    text = f"📋 <b>Ваши фильтры ({current_count}/{MAX_FREE_FILTERS}):</b>\n\n"
+    text = f"📋 <b>Ваши фильтры ({current_count}/{max_filters}):</b>\n\n"
     for f in filters:
         text += f"🆔 <b>{f['id']}</b> — <b>{f['name']}</b>\n"
         text += f"🕐 Последняя проверка: {f['last_checked'] or 'ещё не проверялся'}\n\n"
@@ -293,6 +330,204 @@ async def callback_delete_filter(callback: types.CallbackQuery):
     else:
         logger.error(f"Ошибка удаления фильтра {filter_id} для пользователя {user_id}")
         await callback.answer("Ошибка при удалении", show_alert=True)
+
+
+@dp.message(Command("profile"))
+async def cmd_profile(message: types.Message):
+    """Профиль пользователя"""
+    user_id = message.from_user.id
+    filters_count = count_user_filters(user_id)
+    is_premium = check_premium(user_id)
+    
+    conn = sqlite3.connect("av_bot.db")
+    cursor = conn.cursor()
+    cursor.execute('SELECT expires_at FROM subscriptions WHERE user_id = ?', (user_id,))
+    row = cursor.fetchone()
+    conn.close()
+    
+    if is_premium and row:
+        expires = datetime.strptime(row[0], '%Y-%m-%d %H:%M:%S')
+        days_left = (expires - datetime.now()).days
+        status = f"🟢 Премиум (осталось {days_left} дней)"
+    else:
+        status = f"🟡 Бесплатный ({MAX_FREE_FILTERS} фильтра, проверка раз в 30 минут)"
+    
+    await message.answer(
+        f"👤 <b>Ваш профиль</b>\n\n"
+        f"📊 Статус: {status}\n"
+        f"🎯 Фильтров: {filters_count}/{MAX_FREE_FILTERS if not is_premium else '∞'}\n"
+        f"📅 Дата регистрации: {message.from_user.date}",
+        parse_mode="HTML"
+    )
+
+
+@dp.message(Command("promo"))
+async def cmd_promo(message: types.Message):
+    """Активация промокода"""
+    args = message.text.split()
+    if len(args) < 2:
+        await message.answer(
+            "❌ <b>Использование:</b>\n"
+            "<code>/promo КОД</code>\n\n"
+            "Пример: <code>/promo PREMIUM2025</code>",
+            parse_mode="HTML"
+        )
+        return
+    
+    code = args[1].upper()
+    user_id = message.from_user.id
+    
+    conn = sqlite3.connect("av_bot.db")
+    cursor = conn.cursor()
+    
+    # Проверяем промокод
+    cursor.execute('''
+        SELECT id, days, max_uses, used_count FROM promo_codes
+        WHERE code = ? AND (max_uses > used_count OR max_uses = -1)
+    ''', (code,))
+    promo = cursor.fetchone()
+    
+    if not promo:
+        await message.answer("❌ Промокод не найден или уже использован.")
+        conn.close()
+        return
+    
+    # Проверяем, не использовал ли пользователь этот промокод
+    cursor.execute('''
+        SELECT 1 FROM used_promo WHERE user_id = ? AND promo_code = ?
+    ''', (user_id, code))
+    if cursor.fetchone():
+        await message.answer("❌ Вы уже использовали этот промокод.")
+        conn.close()
+        return
+    
+    # Активируем подписку
+    promo_id, days, max_uses, used_count = promo
+    activate_premium(user_id, days)
+    
+    # Записываем использование
+    cursor.execute('''
+        INSERT INTO used_promo (user_id, promo_code) VALUES (?, ?)
+    ''', (user_id, code))
+    
+    # Увеличиваем счётчик
+    cursor.execute('''
+        UPDATE promo_codes SET used_count = used_count + 1 WHERE code = ?
+    ''', (code,))
+    
+    conn.commit()
+    conn.close()
+    
+    await message.answer(
+        f"✅ <b>Промокод активирован!</b>\n\n"
+        f"Вы получили {days} дней премиум-доступа.\n"
+        f"Теперь у вас безлимит фильтров и проверка раз в 5 минут! 🎉",
+        parse_mode="HTML"
+    )
+
+
+@dp.message(Command("feedback"))
+async def cmd_feedback(message: types.Message, state: FSMContext):
+    """Начало сбора отзыва"""
+    await message.answer(
+        "📝 <b>Поделитесь вашим мнением!</b>\n\n"
+        "Напишите, что вам нравится в работе «Авто-Хантера», а что можно улучшить. "
+        "Ваши отзывы помогают делать сервис лучше.\n\n"
+        "💡 Если нашли ошибку, опишите шаги, как её воспроизвести.\n\n"
+        "Для отмены отправьте /cancel",
+        parse_mode="HTML"
+    )
+    await state.set_state(FeedbackStates.waiting_for_feedback)
+
+
+class FeedbackStates(StatesGroup):
+    waiting_for_feedback = State()
+
+
+@dp.message(FeedbackStates.waiting_for_feedback)
+async def process_feedback(message: types.Message, state: FSMContext, bot: Bot):
+    """Обработка полученного отзыва"""
+    user_id = message.from_user.id
+    username = message.from_user.username or f"@{message.from_user.full_name}"
+    feedback_text = message.text.strip()
+    
+    if len(feedback_text) < 3:
+        await message.answer("❌ Пожалуйста, напишите более развернутый отзыв (минимум 3 символа).")
+        return
+    
+    if add_feedback(user_id, username, feedback_text):
+        await message.answer(
+            "✅ <b>Спасибо за ваш отзыв!</b>\n\n"
+            "Он очень важен для развития «Авто-Хантера».",
+            parse_mode="HTML"
+        )
+        # Отправляем отзыв админу
+        await bot.send_message(
+            ADMIN_ID,
+            f"📝 <b>Новый отзыв!</b>\n\n"
+            f"👤 <b>Пользователь:</b> {username} (ID: {user_id})\n"
+            f"💬 <b>Сообщение:</b>\n{feedback_text}",
+            parse_mode="HTML"
+        )
+        logger.info(f"Новый отзыв от {user_id}: {feedback_text[:50]}...")
+    else:
+        await message.answer("❌ Произошла ошибка при сохранении отзыва. Попробуйте позже.")
+    
+    await state.clear()
+
+
+# ==================== ОБРАБОТКА WEBAPP ДАННЫХ ====================
+@dp.message(F.web_app_data)
+async def handle_web_app_data(message: types.Message):
+    """Обработка данных из мини-приложения"""
+    user_id = message.from_user.id
+    
+    try:
+        data = json.loads(message.web_app_data.data)
+        url = data.get('url')
+        brand = data.get('brand', '')
+        model = data.get('model', '')
+        
+        if not url:
+            await message.answer("❌ Ошибка: ссылка не получена.")
+            return
+        
+        # Проверяем лимит фильтров
+        current_filters = count_user_filters(user_id)
+        is_premium = check_premium(user_id)
+        
+        if not is_premium and current_filters >= MAX_FREE_FILTERS:
+            await message.answer(
+                f"❌ <b>Достигнут лимит фильтров!</b>\n\n"
+                f"На бесплатном тарифе можно добавить не более {MAX_FREE_FILTERS} фильтров.\n"
+                f"У вас уже {current_filters} фильтр(ов).\n\n"
+                f"💎 Чтобы добавить больше, активируйте премиум-доступ.\n"
+                f"Введите промокод, если у вас есть: /promo КОД",
+                parse_mode="HTML"
+            )
+            return
+        
+        # Добавляем фильтр
+        name = f"{brand} {model}" if brand and model else f"Фильтр {current_filters + 1}"
+        filter_id = add_filter(user_id, url, name=name)
+        
+        if filter_id:
+            logger.info(f"Фильтр {filter_id} добавлен для пользователя {user_id} через WebApp")
+            await message.answer(
+                f"✅ <b>Фильтр добавлен!</b>\n\n"
+                f"🚗 {name}\n"
+                f"📊 Фильтров: {current_filters + 1}/{MAX_FREE_FILTERS if not is_premium else '∞'}\n\n"
+                f"Я буду отслеживать новые объявления и присылать уведомления.",
+                parse_mode="HTML"
+            )
+        else:
+            await message.answer("❌ Ошибка при сохранении фильтра.")
+            
+    except json.JSONDecodeError:
+        await message.answer("❌ Ошибка обработки данных.")
+    except Exception as e:
+        logger.error(f"Ошибка обработки WebApp данных: {e}")
+        await message.answer("❌ Произошла ошибка. Попробуйте ещё раз.")
 
 
 # ==================== ЗАПУСК ====================
