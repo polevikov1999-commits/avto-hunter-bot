@@ -21,7 +21,7 @@ from aiogram.fsm.state import State, StatesGroup
 from database.db import (
     init_db, add_user, add_filter, get_user_filters, delete_filter,
     count_user_filters, is_admin, check_premium, activate_premium,
-    add_feedback
+    add_feedback, DB_PATH
 )
 from parser.client import AVByParser
 from monitor.monitor import Monitor
@@ -32,7 +32,7 @@ from utils.logger import setup_logger
 # ==================== НАСТРОЙКИ ====================
 BOT_TOKEN = "8985781891:AAF144OyAVnWey45sfflwbVyKLWzD35gWtY"  # Замените на ваш токен
 ADMIN_ID = 7935728554  # Замените на ваш Telegram ID
-WEBAPP_URL = "https://polevikov1999-commits.github.io/avto-hunter-webapp/"  # Ссылка на мини-приложение
+WEBAPP_URL = "t.me/autohunteravby_bot/avtohunterwebapp"  # Ссылка на мини-приложение
 
 # Ограничения для бесплатных пользователей
 MAX_FREE_FILTERS = 3
@@ -96,6 +96,10 @@ class AddFilterStates(StatesGroup):
     waiting_for_name = State()
 
 
+class FeedbackStates(StatesGroup):
+    waiting_for_feedback = State()
+
+
 # ==================== КОМАНДЫ БОТА ====================
 @dp.message(Command("start"))
 async def cmd_start(message: types.Message):
@@ -104,7 +108,7 @@ async def cmd_start(message: types.Message):
     
     # Если этот пользователь — администратор, обновляем флаг
     if user.id == ADMIN_ID:
-        conn = sqlite3.connect("av_bot.db")
+        conn = sqlite3.connect(DB_PATH)
         conn.execute('UPDATE users SET is_admin = 1 WHERE user_id = ?', (user.id,))
         conn.commit()
         conn.close()
@@ -332,33 +336,8 @@ async def callback_delete_filter(callback: types.CallbackQuery):
         await callback.answer("Ошибка при удалении", show_alert=True)
 
 
+# ==================== ИСПРАВЛЕННАЯ КОМАНДА /profile ====================
 @dp.message(Command("profile"))
-async def cmd_profile(message: types.Message):
-    """Профиль пользователя"""
-    user_id = message.from_user.id
-    filters_count = count_user_filters(user_id)
-    is_premium = check_premium(user_id)
-    
-    conn = sqlite3.connect("av_bot.db")
-    cursor = conn.cursor()
-    cursor.execute('SELECT expires_at FROM subscriptions WHERE user_id = ?', (user_id,))
-    row = cursor.fetchone()
-    conn.close()
-    
-    if is_premium and row:
-        expires = datetime.strptime(row[0], '%Y-%m-%d %H:%M:%S')
-        days_left = (expires - datetime.now()).days
-        status = f"🟢 Премиум (осталось {days_left} дней)"
-    else:
-        status = f"🟡 Бесплатный ({MAX_FREE_FILTERS} фильтра, проверка раз в 30 минут)"
-    
-    await message.answer(
-        f"👤 <b>Ваш профиль</b>\n\n"
-        f"📊 Статус: {status}\n"
-        f"🎯 Фильтров: {filters_count}/{MAX_FREE_FILTERS if not is_premium else '∞'}\n"
-        f"📅 Дата регистрации: {message.from_user.date}",
-        parse_mode="HTML"
-    )@dp.message(Command("profile"))
 async def cmd_profile(message: types.Message):
     """Профиль пользователя"""
     user_id = message.from_user.id
@@ -371,7 +350,7 @@ async def cmd_profile(message: types.Message):
     # Получаем дату регистрации из БД
     cursor.execute('SELECT created_at FROM users WHERE user_id = ?', (user_id,))
     row = cursor.fetchone()
-    created_at = row[0] if row else "неизвестно"
+    created_at = row[0] if row and row[0] else "неизвестно"
     
     # Получаем информацию о подписке
     cursor.execute('SELECT expires_at FROM subscriptions WHERE user_id = ?', (user_id,))
@@ -392,10 +371,10 @@ async def cmd_profile(message: types.Message):
         f"👤 <b>Ваш профиль</b>\n\n"
         f"📊 Статус: {status}\n"
         f"🎯 Фильтров: {filters_count}/{MAX_FREE_FILTERS if not is_premium else '∞'}\n"
-        f"📅 Дата регистрации: {created_at}",
+        f"📅 Дата регистрации: {created_at}\n"
+        f"🆔 ID: {user_id}",
         parse_mode="HTML"
     )
-
 
 
 @dp.message(Command("promo"))
@@ -414,7 +393,7 @@ async def cmd_promo(message: types.Message):
     code = args[1].upper()
     user_id = message.from_user.id
     
-    conn = sqlite3.connect("av_bot.db")
+    conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
     
     # Проверяем промокод
@@ -477,12 +456,8 @@ async def cmd_feedback(message: types.Message, state: FSMContext):
     await state.set_state(FeedbackStates.waiting_for_feedback)
 
 
-class FeedbackStates(StatesGroup):
-    waiting_for_feedback = State()
-
-
 @dp.message(FeedbackStates.waiting_for_feedback)
-async def process_feedback(message: types.Message, state: FSMContext, bot: Bot):
+async def process_feedback(message: types.Message, state: FSMContext):
     """Обработка полученного отзыва"""
     user_id = message.from_user.id
     username = message.from_user.username or f"@{message.from_user.full_name}"
