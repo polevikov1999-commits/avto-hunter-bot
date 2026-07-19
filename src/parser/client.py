@@ -54,17 +54,20 @@ class AVByParser:
     async def fetch_ads(self, url: str, limit: int = 10) -> List[Dict[str, Any]]:
         """Получает список объявлений по URL фильтра"""
         headers = self._get_headers()
-        proxy = self.proxy
         
-        if proxy:
-            logger.debug(f"Использую прокси: {proxy[:30]}...")
+        # Настройка прокси для httpx
+        proxy_config = None
+        if self.proxy:
+            proxy_config = self.proxy
+            logger.debug(f"Использую прокси: {proxy_config[:30]}...")
         
+        # Для httpx >= 0.24.0 используется параметр 'proxy' (единственное число)
         async with httpx.AsyncClient(
             follow_redirects=True,
             headers=headers,
             timeout=self.timeout,
             http2=False,
-            proxies=proxy
+            proxy=proxy_config  # <-- ИСПРАВЛЕНО: proxies → proxy
         ) as client:
             try:
                 delay = random.uniform(1.0, 3.0)
