@@ -1,5 +1,5 @@
 """
-Асинхронный клиент для парсинга AV.BY с поддержкой прокси
+Асинхронный клиент для парсинга AV.BY с поддержкой списка прокси
 """
 import asyncio
 import re
@@ -18,11 +18,48 @@ logger = get_logger('parser')
 
 
 class AVByParser:
-    """Парсер для cars.av.by с поддержкой прокси"""
+    """Парсер для cars.av.by с поддержкой списка прокси"""
     
-    def __init__(self, proxy: str = None):
+    def __init__(self, proxy_list: str = None):
         self.timeout = 30.0
-        self.proxy = proxy or os.getenv("PROXY_URL")
+        
+        # Загружаем список прокси
+        proxy_str = proxy_list or os.getenv("PROXY_LIST") or os.getenv("PROXY_URL")
+        
+        if proxy_str:
+            # Разделяем по запятой и очищаем
+            self.proxies = [p.strip() for p in proxy_str.split(',') if p.strip()]
+            logger.info(f"📋 Загружено прокси: {len(self.proxies)}")
+            if self.proxies:
+                # Маскируем пароль в логах
+                masked = [re.sub(r':[^@]+@', ':***@', p) for p in self.proxies[:3]]
+                logger.info(f"   {', '.join(masked)}...")
+        else:
+            self.proxies = []
+        
+        # Для отслеживания неудачных прокси
+        self._failed_proxies = set()
+    
+    def _get_random_proxy(self) -> Optional[str]:
+        """Возвращает случайный прокси из списка, исключая неудачные"""
+        available = [p for p in self.proxies if p not in self._failed_proxies]
+        if not available:
+            # Сбрасываем список неудачных, если все прокси сгорели
+            if self._failed_proxies:
+                logger.warning("⚠️ Все прокси отмечены как неудачные. Сбрасываю список.")
+                self._failed_proxies.clear()
+                available = self.proxies
+            else:
+                return None
+        
+        return random.choice(available)
+    
+    def _mark_proxy_failed(self, proxy: str):
+        """Отмечает прокси как неудачный"""
+        if proxy and proxy not in self._failed_proxies:
+            self._failed_proxies.add(proxy)
+            masked = re.sub(r':[^@]+@', ':***@', proxy)
+            logger.warning(f"⚠️ Прокси помечен как неудачный: {masked[:40]}...")
     
     def _get_headers(self) -> Dict[str, str]:
         """Генерирует случайные заголовки"""
@@ -52,22 +89,41 @@ class AVByParser:
         }
     
     async def fetch_ads(self, url: str, limit: int = 10) -> List[Dict[str, Any]]:
-        """Получает список объявлений по URL фильтра"""
+        """Получает список объявлений по URL фильтра с ротацией прокси"""
+        # Пробуем максимум 3 разных прокси
+        max_attempts = min(3, len(self.proxies)) if self.proxies else 1
+        
+        for attempt in range(max_attempts):
+            proxy = self._get_random_proxy() if self.proxies else None
+            
+            if proxy:
+                masked = re.sub(r':[^@]+@', ':***@', proxy)
+                logger.debug(f"Попытка {attempt+1}/{max_attempts} с прокси: {masked[:40]}...")
+            
+            result = await self._fetch_single(url, limit, proxy)
+            
+            if result is not None:
+                return result
+            
+            # Если прокси не сработал — помечаем его
+            if proxy:
+                self._mark_proxy_failed(proxy)
+            
+            await asyncio.sleep(random.uniform(1.0, 3.0))
+        
+        logger.error(f"Все попытки ({max_attempts}) не удались для {url[:80]}...")
+        return []
+    
+    async def _fetch_single(self, url: str, limit: int, proxy: Optional[str]) -> Optional[List[Dict[str, Any]]]:
+        """Одиночный запрос с одним прокси"""
         headers = self._get_headers()
         
-        # Настройка прокси для httpx
-        proxy_config = None
-        if self.proxy:
-            proxy_config = self.proxy
-            logger.debug(f"Использую прокси: {proxy_config[:30]}...")
-        
-        # Для httpx >= 0.24.0 используется параметр 'proxy' (единственное число)
         async with httpx.AsyncClient(
             follow_redirects=True,
             headers=headers,
             timeout=self.timeout,
             http2=False,
-            proxy=proxy_config  # <-- ИСПРАВЛЕНО: proxies → proxy
+            proxy=proxy
         ) as client:
             try:
                 delay = random.uniform(1.0, 3.0)
@@ -77,16 +133,12 @@ class AVByParser:
                 response = await client.get(url)
                 
                 if response.status_code == 468:
-                    logger.warning("Получен код 468 (блокировка). Пробую с другими заголовками...")
-                    await asyncio.sleep(random.uniform(3.0, 5.0))
-                    headers = self._get_headers()
-                    response = await client.get(url)
+                    logger.warning("Получен код 468 (блокировка)")
+                    return None
                 
                 if response.status_code != 200:
                     logger.error(f"HTTP ошибка: {response.status_code}")
-                    if response.status_code == 468:
-                        logger.error("AV.BY заблокировал запрос. Проверьте прокси.")
-                    return []
+                    return None
                 
                 soup = BeautifulSoup(response.text, 'lxml')
                 
@@ -115,13 +167,13 @@ class AVByParser:
                 
             except httpx.ProxyError as e:
                 logger.error(f"Ошибка прокси: {e}")
-                return []
+                return None
             except httpx.TimeoutException:
-                logger.error(f"Таймаут при запросе")
-                return []
+                logger.error("Таймаут")
+                return None
             except Exception as e:
-                logger.error(f"Ошибка при парсинге: {e}")
-                return []
+                logger.error(f"Ошибка: {e}")
+                return None
     
     def _parse_item(self, item) -> Optional[Dict[str, Any]]:
         """Парсит одну карточку объявления"""
