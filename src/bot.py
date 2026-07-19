@@ -32,7 +32,7 @@ from utils.logger import setup_logger
 # ==================== НАСТРОЙКИ ====================
 BOT_TOKEN = "8985781891:AAF144OyAVnWey45sfflwbVyKLWzD35gWtY"  # Замените на ваш токен
 ADMIN_ID = 7935728554  # Замените на ваш Telegram ID
-WEBAPP_URL = "t.me/autohunteravby_bot/avtohunterwebapp"  # Ссылка на мини-приложение
+WEBAPP_URL = "https://polevikov1999-commits.github.io/avto-hunter-webapp/"  # Ссылка на мини-приложение
 
 # Ограничения для бесплатных пользователей
 MAX_FREE_FILTERS = 3
